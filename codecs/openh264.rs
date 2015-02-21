@@ -9,6 +9,7 @@
 
 #![allow(missing_copy_implementations)]
 
+use codecs::h264;
 use pixelformat::PixelFormat;
 use timing::Timestamp;
 use videodecoder;
@@ -25,7 +26,7 @@ pub struct OpenH264Codec {
 }
 
 impl OpenH264Codec {
-    pub fn init() -> Result<OpenH264Codec,c_long> {
+    pub fn init(headers: &videodecoder::VideoHeaders) -> Result<OpenH264Codec,c_long> {
         unsafe {
             let mut decoder: *mut ffi::ISVCDecoder = mem::zeroed();
             let err = ffi::WelsCreateDecoder(&mut decoder);
@@ -38,12 +39,22 @@ impl OpenH264Codec {
             decParam.uiTargetDqLayer = u8::MAX;
             decParam.eEcActiveIdc = ffi::ERROR_CON_SLICE_MV_COPY_CROSS_IDR_FREEZE_RES_CHANGE;
             decParam.sVideoProperty.size = 8;
-            decParam.sVideoProperty.eVideoBsType = ffi::VIDEO_BITSTREAM_DEFAULT;
+            decParam.sVideoProperty.eVideoBsType = ffi::VIDEO_BITSTREAM_AVC; //  ffi::VIDEO_BITSTREAM_DEFAULT;
 
             let result = ((**decoder).Initialize)(decoder, &decParam);
             if result != 0 {
                 return Err(result);
             }
+
+            let avcc = h264::create_avcc_chunk(headers);
+
+            let mut dst: *mut c_uchar = mem::zeroed();
+            let mut decoded: ffi::SBufferInfo = Default::default();
+
+            let state = ((**decoder).DecodeFrame2)(decoder, avcc.as_ptr(), avcc.len() as c_int,
+                                                   &mut dst, &mut decoded);
+
+            println!("initial state {:?}", state);
 
             Ok(OpenH264Codec {
                 decoder: decoder,
@@ -147,9 +158,9 @@ struct VideoDecoderImpl {
 }
 
 impl VideoDecoderImpl {
-    fn new(_: &videodecoder::VideoHeaders, _: i32, _: i32)
+    fn new(headers: &videodecoder::VideoHeaders, _: i32, _: i32)
            -> Result<Box<videodecoder::VideoDecoder + 'static>,()> {
-        match OpenH264Codec::init() {
+        match OpenH264Codec::init(headers) {
             Ok(codec) => {
                 Ok(Box::new(VideoDecoderImpl {
                     codec: codec,
