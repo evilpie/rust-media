@@ -16,6 +16,8 @@ use libc::{c_int, c_uint};
 use codecs::libavcodec;
 #[cfg(target_os="macos")]
 use platform;
+#[cfg(not(target_os="macos"))]
+use codecs::openh264;
 
 pub trait VideoDecoder {
     fn decode_frame(&self, data: &[u8], presentation_time: &Timestamp)
@@ -98,6 +100,7 @@ pub static VIDEO_DECODERS: [RegisteredVideoDecoder; 3] = [
     platform::macos::videotoolbox::VIDEO_DECODER,
 ];
 
+/*
 #[cfg(all(not(target_os="macos"), feature="ffmpeg"))]
 pub static VIDEO_DECODERS: [RegisteredVideoDecoder; 3] = [
     vpx::VIDEO_DECODER,
@@ -109,5 +112,13 @@ pub static VIDEO_DECODERS: [RegisteredVideoDecoder; 3] = [
 pub static VIDEO_DECODERS: [RegisteredVideoDecoder; 2] = [
     vpx::VIDEO_DECODER,
     gif::VIDEO_DECODER,
+];
+*/
+
+#[cfg(not(target_os="macos"))]
+pub static VIDEO_DECODERS: [RegisteredVideoDecoder; 3] = [
+    vpx::VIDEO_DECODER,
+    gif::VIDEO_DECODER,
+    openh264::VIDEO_DECODER,
 ];
 

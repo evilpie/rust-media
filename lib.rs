@@ -32,6 +32,8 @@ pub mod codecs {
 
     #[cfg(feature="ffmpeg")]
     pub mod libavcodec;
+
+    pub mod openh264;
 }
 
 pub mod containers {

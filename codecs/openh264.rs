@@ -13,133 +13,130 @@ use pixelformat::PixelFormat;
 use timing::Timestamp;
 use videodecoder;
 
-use libc::{c_int, c_long, c_uint};
+use libc::{c_uchar, c_int, c_long, c_uint};
 use std::ptr;
 use std::slice;
-use std::u32;
-
+use std::{u8, u32};
+use std::default::Default;
+use std::mem;
 
 pub struct OpenH264Codec {
-    decoder: ffi::ISVCDecoder,
+    decoder: *mut ffi::ISVCDecoder,
 }
 
 impl OpenH264Codec {
-    pub fn init(iface: &VpxCodecIface) -> Result<OpenH264Codec,c_long> {
-        let mut decoder = Default::default();
-        let err = unsafe {
-            ffi::WelsCreateDecoder(&mut decoder)
-        };
-        if err != 0 {
-            return Err(err)
+    pub fn init() -> Result<OpenH264Codec,c_long> {
+        unsafe {
+            let mut decoder: *mut ffi::ISVCDecoder = mem::zeroed();
+            let err = ffi::WelsCreateDecoder(&mut decoder);
+            if err != 0 {
+                return Err(err)
+            }
+
+            let mut decParam: ffi::SDecodingParam = Default::default();
+            decParam.eOutputColorFormat = ffi::videoFormatI420;
+            decParam.uiTargetDqLayer = u8::MAX;
+            decParam.eEcActiveIdc = ffi::ERROR_CON_SLICE_MV_COPY_CROSS_IDR_FREEZE_RES_CHANGE;
+            decParam.sVideoProperty.size = 8;
+            decParam.sVideoProperty.eVideoBsType = ffi::VIDEO_BITSTREAM_DEFAULT;
+
+            let result = ((**decoder).Initialize)(decoder, &decParam);
+            if result != 0 {
+                return Err(result);
+            }
+
+            Ok(OpenH264Codec {
+                decoder: decoder,
+            })
         }
-        Ok(OpenH264Codec {
-            decoder: decoder,
+    }
+
+    pub fn decode(&self, data: &[u8], deadline: c_long) -> Option<OpenH264Image> {
+        assert!(data.len() <= (u32::MAX as usize));
+
+        let mut stride: c_int = 0;
+        let mut width: c_int = 0;
+        let mut height: c_int = 0;
+
+        // this should be [3]
+        let mut dst: *mut c_uchar = unsafe {
+            mem::zeroed()
+        };
+
+        // println!("data: {:?}", data);
+
+        let state = unsafe {
+            ((**self.decoder).DecodeFrame)(self.decoder,
+                                           data.as_ptr(), data.len() as c_int,
+                                           &mut dst, &mut stride,
+                                           &mut width, &mut height)
+        };
+
+        println!("state: {:?}", state);
+        // println!("stride: {:?}", stride);
+
+        Some(OpenH264Image {
+            data: dst,
+            stride: stride,
+            width: width,
+            height: height
         })
     }
-
-    pub fn decode(&self, data: &[u8], deadline: c_long) -> Result<(),ffi::vpx_codec_err_t> {
-        assert!(data.len() <= (u32::MAX as usize));
-        let error = unsafe {
-            ffi::vpx_codec_decode(&self.ctx as *const _ as *mut _,
-                                  data.as_ptr(),
-                                  data.len() as c_uint,
-                                  ptr::null_mut(),
-                                  deadline)
-        };
-        if error == ffi::VPX_CODEC_OK {
-            Ok(())
-        } else {
-            Err(error)
-        }
-    }
-
-    pub fn frame<'a>(&'a self, iter: &mut Option<VpxCodecIter<'a>>) -> Option<VpxImage> {
-        let mut iter_ptr = match *iter {
-            None => ptr::null_mut(),
-            Some(ref iter) => iter.iter,
-        };
-        let image = unsafe {
-            ffi::vpx_codec_get_frame(&self.ctx as *const ffi::vpx_codec_ctx_t
-                                               as *mut ffi::vpx_codec_ctx_t,
-                                     &mut iter_ptr)
-        };
-        *iter = if iter_ptr == ptr::null_mut() {
-            None
-        } else {
-            Some(VpxCodecIter {
-                iter: iter_ptr,
-            })
-        };
-        if !image.is_null() {
-            Some(VpxImage {
-                image: image,
-            })
-        } else {
-            None
-        }
-    }
 }
 
-pub struct VpxCodecIter<'a> {
-    iter: ffi::vpx_codec_iter_t,
+pub struct OpenH264Image {
+    data: *mut c_uchar,
+    stride: c_int,
+    width: c_int,
+    height: c_int
 }
 
-pub struct VpxImage {
-    image: *mut ffi::vpx_image_t,
-}
-
-impl Drop for VpxImage {
+impl Drop for OpenH264Image {
     fn drop(&mut self) {
         unsafe {
-            ffi::vpx_img_free(self.image)
+            // XXX Figure this out!!!
+            // ffi::vpx_img_free(self.image)
         }
     }
 }
 
-impl VpxImage {
+impl OpenH264Image {
     pub fn width(&self) -> c_uint {
-        unsafe {
-            (*self.image).w
-        }
+        self.width as c_uint
     }
 
     pub fn height(&self) -> c_uint {
-        unsafe {
-            (*self.image).h
-        }
+        self.height as c_uint
     }
 
     pub fn bit_depth(&self) -> c_uint {
-        unsafe {
-            (*self.image).bit_depth
-        }
+        0 // xxx fixme
     }
 
     pub fn stride(&self, index: c_uint) -> c_int {
         assert!(index < 4);
-        unsafe {
-            (*self.image).stride[index as usize]
-        }
+        // XXX fixme
+        self.stride
+        // unsafe {
+        //     (*self.image).stride[index as c_int]
+        // }
     }
 
     pub fn plane<'a>(&'a self, index: c_uint) -> &'a [u8] {
         assert!(index < 4);
+        // unsafe {
+        //     let len = (self.stride(index) as c_uint) * (*self.image).h;
+        //     slice::from_raw_mut_buf(&(*self.image).planes[index as c_int], len as usize)
+        // }
         unsafe {
-            let len = (self.stride(index) as c_uint) * (*self.image).h;
-            slice::from_raw_mut_buf(&(*self.image).planes[index as usize], len as usize)
-        }
-    }
-
-    pub fn format(&self) -> ffi::vpx_img_fmt_t {
-        unsafe {
-            (*self.image).fmt
+            let len = self.stride * self.height;
+            slice::from_raw_mut_buf(&self.data, len as usize)
         }
     }
 
     pub fn bps(&self) -> c_int {
-        unsafe {
-            (*self.image).bps
-        }
+        // XXX fixme
+        0
     }
 }
 
@@ -152,7 +149,7 @@ struct VideoDecoderImpl {
 impl VideoDecoderImpl {
     fn new(_: &videodecoder::VideoHeaders, _: i32, _: i32)
            -> Result<Box<videodecoder::VideoDecoder + 'static>,()> {
-        match OpenH264Codec::init(&VpxCodecIface::vp8()) {
+        match OpenH264Codec::init() {
             Ok(codec) => {
                 Ok(Box::new(VideoDecoderImpl {
                     codec: codec,
@@ -166,16 +163,10 @@ impl VideoDecoderImpl {
 impl videodecoder::VideoDecoder for VideoDecoderImpl {
     fn decode_frame(&self, data: &[u8], presentation_time: &Timestamp)
                     -> Result<Box<videodecoder::DecodedVideoFrame + 'static>,()> {
-        if self.codec.decode(data, 0).is_err() {
-            return Err(())
-        }
-        let image = match self.codec.frame(&mut None) {
+        let image = match self.codec.decode(data, 0) {
             None => return Err(()),
             Some(image) => image,
         };
-        if image.format() != ffi::VPX_IMG_FMT_I420 {
-            return Err(())
-        }
         Ok(Box::new(DecodedVideoFrameImpl {
             image: image,
             presentation_time: *presentation_time,
@@ -184,7 +175,7 @@ impl videodecoder::VideoDecoder for VideoDecoderImpl {
 }
 
 struct DecodedVideoFrameImpl {
-    image: VpxImage,
+    image: OpenH264Image,
     presentation_time: Timestamp,
 }
 
@@ -217,7 +208,7 @@ impl videodecoder::DecodedVideoFrame for DecodedVideoFrameImpl {
 }
 
 struct DecodedVideoFrameLockGuardImpl<'a> {
-    image: &'a VpxImage,
+    image: &'a OpenH264Image,
 }
 
 impl<'a> videodecoder::DecodedVideoFrameLockGuard for DecodedVideoFrameLockGuardImpl<'a> {
@@ -228,7 +219,7 @@ impl<'a> videodecoder::DecodedVideoFrameLockGuard for DecodedVideoFrameLockGuard
 
 pub const VIDEO_DECODER: videodecoder::RegisteredVideoDecoder =
     videodecoder::RegisteredVideoDecoder {
-        id: [ b'a', b'v', b'c', b'0' ],
+        id: [ b'a', b'v', b'c', b' ' ],
         constructor: VideoDecoderImpl::new,
     };
 
@@ -347,7 +338,7 @@ pub struct Struct_TagSysMemBuffer {
     pub iWidth: ::libc::c_int,
     pub iHeight: ::libc::c_int,
     pub iFormat: ::libc::c_int,
-    pub iStride: [::libc::c_int; 2usize],
+    pub iStride: [::libc::c_int; 2],
 }
 impl ::std::default::Default for Struct_TagSysMemBuffer {
     fn default() -> Struct_TagSysMemBuffer { unsafe { ::std::mem::zeroed() } }
@@ -367,7 +358,7 @@ impl ::std::default::Default for Struct_TagBufferInfo {
 #[repr(C)]
 #[derive(Copy)]
 pub struct Union_Unnamed6 {
-    pub _bindgen_data_: [u32; 5usize],
+    pub _bindgen_data_: [u32; 5],
 }
 impl Union_Unnamed6 {
     pub unsafe fn sSystemBuffer(&mut self) -> *mut SSysMEMBuffer {
@@ -529,7 +520,7 @@ pub type SLTRConfig = Struct_Unnamed18;
 #[repr(C)]
 #[derive(Copy)]
 pub struct Struct_Unnamed19 {
-    pub uiSliceMbNum: [::libc::c_uint; 35usize],
+    pub uiSliceMbNum: [::libc::c_uint; 35],
     pub uiSliceNum: ::libc::c_uint,
     pub uiSliceSizeConstraint: ::libc::c_uint,
 }
@@ -666,7 +657,7 @@ pub struct Struct_TagEncParamExt {
     pub fMaxFrameRate: ::libc::c_float,
     pub iTemporalLayerNum: ::libc::c_int,
     pub iSpatialLayerNum: ::libc::c_int,
-    pub sSpatialLayers: [SSpatialLayerConfig; 4usize],
+    pub sSpatialLayers: [SSpatialLayerConfig; 4],
     pub iComplexityMode: ECOMPLEXITY_MODE,
     pub uiIntraPeriod: ::libc::c_uint,
     pub iNumRefFrame: ::libc::c_int,
@@ -749,7 +740,7 @@ pub struct Struct_Unnamed32 {
     pub iTemporalId: ::libc::c_int,
     pub iSubSeqId: ::libc::c_int,
     pub iLayerNum: ::libc::c_int,
-    pub sLayerInfo: [SLayerBSInfo; 128usize],
+    pub sLayerInfo: [SLayerBSInfo; 128],
     pub eFrameType: EVideoFrameType,
     pub iFrameSizeInBytes: ::libc::c_int,
     pub uiTimeStamp: ::libc::c_longlong,
@@ -763,8 +754,8 @@ pub type PFrameBSInfo = *mut Struct_Unnamed32;
 #[derive(Copy)]
 pub struct Struct_Source_Picture_s {
     pub iColorFormat: ::libc::c_int,
-    pub iStride: [::libc::c_int; 4usize],
-    pub pData: [*mut ::libc::c_uchar; 4usize],
+    pub iStride: [::libc::c_int; 4],
+    pub pData: [*mut ::libc::c_uchar; 4],
     pub iPicWidth: ::libc::c_int,
     pub iPicHeight: ::libc::c_int,
     pub uiTimeStamp: ::libc::c_longlong,
@@ -851,7 +842,7 @@ pub type SDecoderCapability = Struct_TagDecoderCapability;
 #[derive(Copy)]
 pub struct Struct_TagParserBsInfo {
     pub iNalNum: ::libc::c_int,
-    pub iNalLenInByte: [::libc::c_int; 128usize],
+    pub iNalLenInByte: [::libc::c_int; 128],
     pub pDstBuff: *mut ::libc::c_uchar,
     pub iSpsWidthInPixel: ::libc::c_int,
     pub iSpsHeightInPixel: ::libc::c_int,
@@ -968,25 +959,17 @@ pub type ISVCDecoder = *mut ISVCDecoderVtbl;
 #[repr(C)]
 #[derive(Copy)]
 pub struct Struct_ISVCDecoderVtbl {
-    pub Initialize: ::std::option::Option<extern "C" fn
-                                              (arg1: *mut ISVCDecoder,
-                                               pParam: *const SDecodingParam)
-                                              -> ::libc::c_long>,
-    pub Uninitialize: ::std::option::Option<extern "C" fn
-                                                (arg1: *mut ISVCDecoder)
-                                                -> ::libc::c_long>,
-    pub DecodeFrame: ::std::option::Option<extern "C" fn
-                                               (arg1: *mut ISVCDecoder,
-                                                pSrc: *const ::libc::c_uchar,
-                                                iSrcLen: ::libc::c_int,
-                                                ppDst:
-                                                    *mut *mut ::libc::c_uchar,
-                                                pStride: *mut ::libc::c_int,
-                                                iWidth: *mut ::libc::c_int,
-                                                iHeight: *mut ::libc::c_int)
-                                               -> DECODING_STATE>,
-    pub DecodeFrameNoDelay: ::std::option::Option<extern "C" fn
-                                                      (arg1: *mut ISVCDecoder,
+    pub Initialize: extern "C" fn(arg1: *mut ISVCDecoder, pParam: *const SDecodingParam)
+                                -> ::libc::c_long,
+    pub Uninitialize: extern "C" fn(arg1: *mut ISVCDecoder) -> ::libc::c_long,
+    pub DecodeFrame: extern "C" fn(arg1: *mut ISVCDecoder,
+                                   pSrc: *const ::libc::c_uchar,
+                                   iSrcLen: ::libc::c_int,
+                                   ppDst: *mut *mut ::libc::c_uchar,
+                                   pStride: *mut ::libc::c_int,
+                                   iWidth: *mut ::libc::c_int,
+                                   iHeight: *mut ::libc::c_int) -> DECODING_STATE,
+    pub DecodeFrameNoDelay: extern "C" fn(arg1: *mut ISVCDecoder,
                                                        pSrc:
                                                            *const ::libc::c_uchar,
                                                        iSrcLen: ::libc::c_int,
@@ -994,23 +977,20 @@ pub struct Struct_ISVCDecoderVtbl {
                                                            *mut *mut ::libc::c_uchar,
                                                        pDstInfo:
                                                            *mut SBufferInfo)
-                                                      -> DECODING_STATE>,
-    pub DecodeFrame2: ::std::option::Option<extern "C" fn
-                                                (arg1: *mut ISVCDecoder,
+                                                      -> DECODING_STATE,
+    pub DecodeFrame2: extern "C" fn(arg1: *mut ISVCDecoder,
                                                  pSrc: *const ::libc::c_uchar,
                                                  iSrcLen: ::libc::c_int,
                                                  ppDst:
                                                      *mut *mut ::libc::c_uchar,
                                                  pDstInfo: *mut SBufferInfo)
-                                                -> DECODING_STATE>,
-    pub DecodeParser: ::std::option::Option<extern "C" fn
-                                                (arg1: *mut ISVCDecoder,
+                                                -> DECODING_STATE,
+    pub DecodeParser: extern "C" fn(arg1: *mut ISVCDecoder,
                                                  pSrc: *const ::libc::c_uchar,
                                                  iSrcLen: ::libc::c_int,
                                                  pDstInfo: *mut SParserBsInfo)
-                                                -> DECODING_STATE>,
-    pub DecodeFrameEx: ::std::option::Option<extern "C" fn
-                                                 (arg1: *mut ISVCDecoder,
+                                                -> DECODING_STATE,
+    pub DecodeFrameEx: extern "C" fn(arg1: *mut ISVCDecoder,
                                                   pSrc:
                                                       *const ::libc::c_uchar,
                                                   iSrcLen: ::libc::c_int,
@@ -1021,17 +1001,15 @@ pub struct Struct_ISVCDecoderVtbl {
                                                   iHeight: *mut ::libc::c_int,
                                                   iColorFormat:
                                                       *mut ::libc::c_int)
-                                                 -> DECODING_STATE>,
-    pub SetOption: ::std::option::Option<extern "C" fn
-                                             (arg1: *mut ISVCDecoder,
+                                                 -> DECODING_STATE,
+    pub SetOption: extern "C" fn(arg1: *mut ISVCDecoder,
                                               eOptionId: DECODER_OPTION,
                                               pOption: *mut ::libc::c_void)
-                                             -> ::libc::c_long>,
-    pub GetOption: ::std::option::Option<extern "C" fn
-                                             (arg1: *mut ISVCDecoder,
+                                             -> ::libc::c_long,
+    pub GetOption: extern "C" fn(arg1: *mut ISVCDecoder,
                                               eOptionId: DECODER_OPTION,
                                               pOption: *mut ::libc::c_void)
-                                             -> ::libc::c_long>,
+                                             -> ::libc::c_long,
 }
 impl ::std::default::Default for Struct_ISVCDecoderVtbl {
     fn default() -> Struct_ISVCDecoderVtbl { unsafe { ::std::mem::zeroed() } }
@@ -1054,29 +1032,5 @@ extern "C" {
     pub fn WelsGetCodecVersion() -> OpenH264Version;
     pub fn WelsGetCodecVersionEx(pVersion: *mut OpenH264Version) -> ();
 }
-
-}
-
-fn main() {
-
-    unsafe {
-        let version = WelsGetCodecVersion();
-
-        println!("{:?}", version.uMinor);
-
-        let mut decoder: *mut ISVCDecoder = mem::zeroed();
-        WelsCreateDecoder(&mut decoder);
-
-
-        let mut decParam: SDecodingParam = Default::default();
-        decParam.eOutputColorFormat  = videoFormatI420;
-        decParam.uiTargetDqLayer = std::u8::MAX;
-        decParam.eEcActiveIdc = ERROR_CON_SLICE_COPY;
-        decParam.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_DEFAULT;
-
-        (**decoder).Initialize.unwrap()(decoder, &decParam);
-
-        
-    }
 
 }
